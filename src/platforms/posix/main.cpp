@@ -50,6 +50,7 @@
 #include "px4_middleware.h"
 #include "DriverFramework.hpp"
 #include <termios.h>
+#include <sys/stat.h>
 
 namespace px4
 {
@@ -83,6 +84,75 @@ extern "C" {
 		PX4_BACKTRACE();
 		cout.flush();
 	}
+}
+
+static inline bool exists(const std::string &name)
+{
+	struct stat buffer;
+	return (stat(name.c_str(), &buffer) == 0);
+}
+
+static inline void touch(const std::string &name)
+{
+	fstream fs;
+	fs.open(name, ios::out);
+	fs.close();
+}
+
+static int mkpath(const char *path, mode_t mode);
+
+static int do_mkdir(const char *path, mode_t mode)
+{
+	struct stat             st;
+	int             status = 0;
+
+	if (stat(path, &st) != 0) {
+		/* Directory does not exist. EEXIST for race condition */
+		if (mkdir(path, mode) != 0 && errno != EEXIST) {
+			status = -1;
+		}
+
+	} else if (!S_ISDIR(st.st_mode)) {
+		errno = ENOTDIR;
+		status = -1;
+	}
+
+	return (status);
+}
+
+/**
+** mkpath - ensure all directories in path exist
+** Algorithm takes the pessimistic view and works top-down to ensure
+** each directory in path exists, rather than optimistically creating
+** the last element and working backwards.
+*/
+static int mkpath(const char *path, mode_t mode)
+{
+	char           *pp;
+	char           *sp;
+	int             status;
+	char           *copypath = strdup(path);
+
+	status = 0;
+	pp = copypath;
+
+	while (status == 0 && (sp = strchr(pp, '/')) != 0) {
+		if (sp != pp) {
+			/* Neither root nor double slash in path */
+			*sp = '\0';
+			status = do_mkdir(copypath, mode);
+			*sp = '/';
+		}
+
+		pp = sp + 1;
+	}
+
+	if (status == 0) {
+		status = do_mkdir(path, mode);
+	}
+
+	free(copypath);
+	return (status);
 }
 
 static void print_prompt()
@@ -204,6 +274,7 @@ int main(int argc, char **argv)
 	int index = 1;
 	char *commands_file = nullptr;
 
+	// parse arguments
 	while (index < argc) {
 		if (argv[index][0] == '-') {
 			// the arg starts with -
@@ -222,6 +293,9 @@ int main(int argc, char **argv)
 				return 1;
 			}
 
+		} else if (argv[index][0] == '_' && argv[index][1] == '_') {
+			// roslaunch arg
+
 		} else {
 			// this is an argument that does not have '-' prefix; treat it like a file name
 			ifstream infile(argv[index]);
@@ -239,6 +313,21 @@ int main(int argc, char **argv)
 		++index;
 	}
 
+	// setup rootfs
+	const std::string eeprom_path = "./rootfs/eeprom/";
+	const std::string microsd_path = "./rootfs/fs/microsd/";
+
+	if (!exists(eeprom_path + "parameters")) {
+		std::cout << "creating new parameters file" << std::endl;
+		mkpath(eeprom_path.c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+		touch(eeprom_path + "parameters");
+	}
+
+	if (!exists(microsd_path + "dataman")) {
+		std::cout << "creating new dataman file" << std::endl;
+		mkpath(microsd_path.c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+		touch(microsd_path + "dataman");
+	}
 
 	DriverFramework::Framework::initialize();
 	px4::init_once();
